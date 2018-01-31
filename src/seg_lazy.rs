@@ -14,7 +14,6 @@ pub struct SEG<T: SEGimpl> {
 impl<T: SEGimpl> SEG<T> {
     #[allow(dead_code)]
     pub fn new(n: usize, zero: T::Elem) -> SEG<T> {
-        let n = (1..).map(|i| 1 << i).find(|&x| x >= n).unwrap();
         SEG {
             n,
             buf: vec![zero.clone(); 2 * n],
@@ -24,9 +23,9 @@ impl<T: SEGimpl> SEG<T> {
     }
 
     #[allow(dead_code)]
-    fn eval(&mut self, k: usize, l: usize, r: usize) {
-        if r - l > 1 {
-            let (l, r) = self.buf.split_at_mut(2 * k + 1);
+    fn eval(&mut self, k: usize) {
+        if k < self.n && k > 0 {
+            let (l, r) = self.buf.split_at_mut(k << 1);
             let (c1, c2) = r.split_at_mut(1);
             T::eval(&mut l[k], Some((&mut c1[0], &mut c2[0])));
         } else {
@@ -34,17 +33,35 @@ impl<T: SEGimpl> SEG<T> {
         }
     }
 
+    fn push(&mut self, k: usize) {
+        let h = 8 * std::mem::size_of::<usize>() - k.leading_zeros() as usize;
+        for s in (1..h + 1).rev() {
+            let i = k >> s;
+            self.eval(i << 1);
+            self.eval((i << 1) | 1);
+        }
+        self.eval(k);
+    }
+
+    fn reduce(&mut self, k: usize) {
+        if k < self.n {
+            self.eval(k << 1);
+            self.eval((k << 1) | 1);
+        }
+        let (l, r) = self.buf.split_at_mut(k << 1);
+        let (c1, c2) = r.split_at_mut(1);
+        T::reduce(&mut l[k], &c1[0], &c2[0]);
+    }
+
     #[allow(dead_code)]
     pub fn update(&mut self, i: usize, x: T::Elem) {
-        let mut k = i + self.n - 1;
+        let mut k = i + self.n;
         self.buf[k] = x;
-        self.eval(k, i, i + 1);
+        self.eval(k);
 
-        while k > 0 {
-            k = (k - 1) / 2;
-            let (l, r) = self.buf.split_at_mut(2 * k + 1);
-            let (c1, c2) = r.split_at_mut(1);
-            T::reduce(&mut l[k], &c1[0], &c2[0]);
+        while k > 1 {
+            k >>= 1;
+            self.reduce(k);
         }
     }
 
@@ -53,29 +70,42 @@ impl<T: SEGimpl> SEG<T> {
         self.query(i, i + 1)
     }
 
-    #[allow(dead_code)]
-    fn r(&mut self, x: &T::A, a: usize, b: usize, k: usize, l: usize, r: usize) {
-        self.eval(k, l, r);
-        if r <= a || b <= l {
-            return;
+    fn build(&mut self, mut k: usize) {
+        while k > 1 {
+            k >>= 1;
+            self.reduce(k);
         }
-        if a <= l && r <= b {
-            T::range(x, &mut self.buf[k], l, r);
-            self.eval(k, l, r);
-            return;
-        }
-
-        self.r(x, a, b, 2 * k + 1, l, (l + r) / 2);
-        self.r(x, a, b, 2 * k + 2, (l + r) / 2, r);
-        let (l, r) = self.buf.split_at_mut(2 * k + 1);
-        let (c1, c2) = r.split_at_mut(1);
-        T::reduce(&mut l[k], &c1[0], &c2[0]);
     }
 
     #[allow(dead_code)]
-    pub fn range_add(&mut self, x: &T::A, a: usize, b: usize) {
+    pub fn range_add(&mut self, x: &T::A, l: usize, r: usize) {
+        if l == r {
+            return;
+        }
+        let l0 = l;
+        let r0 = r;
+        let mut l = l + self.n;
+        let mut r = r + self.n;
+        let mut d = 0;
+
+        while l < r {
+            if l & 1 == 1 {
+                let ll = (l0 << d) >> d;
+                T::range(x, &mut self.buf[l], ll, ll + (1 << d));
+                l += 1;
+            }
+            if r & 1 == 1 {
+                r -= 1;
+                let rr = (r0 << d) >> d;
+                T::range(x, &mut self.buf[r], rr, rr + (1 << d));
+            }
+            d += 1;
+            l >>= 1;
+            r >>= 1;
+        }
         let n = self.n;
-        self.r(x, a, b, 0, 0, n);
+        self.build(l0 + n);
+        self.build(r0 + n - 1);
     }
 
     #[allow(dead_code)]
@@ -84,38 +114,51 @@ impl<T: SEGimpl> SEG<T> {
     }
 
     #[allow(dead_code)]
-    fn q(&mut self, a: usize, b: usize, k: usize, l: usize, r: usize) -> Option<T::Elem> {
-        self.eval(k, l, r);
-        if r <= a || b <= l {
+    pub fn query(&mut self, l: usize, r: usize) -> Option<T::R> {
+        if l == r {
             return None;
         }
-        if a <= l && r <= b {
-            Some(self.buf[k].clone())
-        } else {
-            let vl = self.q(a, b, k * 2 + 1, l, (l + r) / 2);
-            let vr = self.q(a, b, k * 2 + 2, (l + r) / 2, r);
-            match (vl, vr) {
-                (Some(l), Some(r)) => {
-                    let mut res = self.zero.clone();
-                    T::reduce(&mut res, &l, &r);
-                    Some(res)
-                }
-                (Some(l), None) => Some(l),
-                (None, Some(r)) => Some(r),
-                _ => None,
+        let mut l = l + self.n;
+        let mut r = r + self.n;
+        self.push(l);
+        self.push(r - 1);
+        self.build(l);
+        self.build(r - 1);
+        let mut vl = None;
+        let mut vr = None;
+
+        let combine = |resl, resr| match (resl, resr) {
+            (Some(l), Some(r)) => {
+                let mut t = self.zero.clone();
+                Some(T::reduce(&mut t, &l, &r));
+                Some(t)
             }
+            (Some(l), None) => Some(l),
+            (None, Some(r)) => Some(r),
+            _ => None,
+        };
+
+        while l < r {
+            if l & 1 == 1 {
+                vl = combine(vl, Some(self.buf[l].clone()));
+                l += 1;
+            }
+            if r & 1 == 1 {
+                r -= 1;
+                vr = combine(Some(self.buf[r].clone()), vr);
+            }
+
+            l >>= 1;
+            r >>= 1;
         }
-    }
-    #[allow(dead_code)]
-    pub fn query(&mut self, a: usize, b: usize) -> Option<T::R> {
-        let n = self.n;
-        self.q(a, b, 0, 0, n).map(T::to_result)
+
+        combine(vl, vr).map(T::to_result)
     }
 }
 
 #[snippet = "SEG_LAZY"]
 pub trait SEGimpl {
-    type Elem: Clone;
+    type Elem: Clone + std::fmt::Debug;
     type A;
     type R;
 
