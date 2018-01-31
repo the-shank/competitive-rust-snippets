@@ -122,8 +122,6 @@ impl<T: SEGimpl> SEG<T> {
         let mut r = r + self.n;
         self.push(l);
         self.push(r - 1);
-        self.build(l);
-        self.build(r - 1);
         let mut vl = None;
         let mut vr = None;
 
