@@ -6,6 +6,7 @@
 extern crate rand;
 extern crate test;
 
+pub mod bigint;
 pub mod binary_search;
 pub mod bit;
 pub mod bit_simple;
